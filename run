@@ -1,0 +1,656 @@
+#!/bin/bash
+set -eo pipefail
+
+# Command descriptions for help output (short, one-line)
+help-for() {
+  case "$1" in
+    initialize)       echo "Initialize a new worktree after creation" ;;
+    ui-start)         echo "Start the Electron app in dev mode" ;;
+    ui-build)         echo "Build the UI bundle into dist-ui/ (for a packaged app use ui-app-install)" ;;
+    ui-test)          echo "Run Electron/JS tests" ;;
+    ui-app-install)   echo "Build Notes Graph.app and install it to /Applications" ;;
+    mcp-test)         echo "Run Python/MCP tests (pass pytest args after)" ;;
+    test)             echo "Run all tests (JS + Python; pass pytest args after)" ;;
+    ui-helper-start)     echo "Run UI helper daemon in foreground (dev/debug)" ;;
+    ui-helper-install)   echo "Install or replace the UI helper LaunchAgent (needs mcp-app-install first)" ;;
+    ui-helper-uninstall) echo "Unload and remove UI helper LaunchAgent" ;;
+    ui-helper-status)    echo "Check if UI helper daemon is running" ;;
+    mcp-app-build)       echo "Build AppleNotesMCP.app (Swift wrapper for FDA in Claude Desktop)" ;;
+    mcp-app-spike)       echo "Run FDA propagation probes against the installed AppleNotesMCP.app" ;;
+    mcp-app-install)     echo "Build, install to ~/Applications, bake venv entry path, re-sign" ;;
+    mcp-app-uninstall)   echo "Remove ~/Applications/AppleNotesMCP.app (FDA grant preserved)" ;;
+    mcp-app-status)      echo "Check installed bundle integrity, signing identity, python entry" ;;
+    remote-start)        echo "Run the remote (HTTP + OAuth) MCP server in the foreground on 127.0.0.1:9893" ;;
+    remote-check)        echo "Validate remote.json + secret; print exposed tools and folders" ;;
+    remote-revoke-tokens) echo "Revoke every remote OAuth token, the client pin and in-flight sign-ins" ;;
+    remote-allow-client) echo "Allow another connector client_id (usage: remote-allow-client <id>)" ;;
+    remote-kill)         echo "Kill switch: stop the remote tunnel and server" ;;
+    remote-plist)        echo "Render the remote LaunchAgent plist into dist/ (does NOT install it)" ;;
+    remote-writes)       echo "Manage the remote write queue: list | apply <id>|--all | undo <id> | pause | resume | clear" ;;
+    demo-build)          echo "Generate the synthetic demo Notes library under demo/home" ;;
+    demo-ui)             echo "Open the graph UI on the demo library (never reads your real notes)" ;;
+    demo-mcp)            echo "Run the stdio MCP server on the demo library" ;;
+    *)                echo "" ;;
+  esac
+}
+
+# Detailed help for individual commands (./run <cmd> -h)
+help-detail() {
+  case "$1" in
+    ui-helper-install)
+      echo "Usage: ./run ui-helper-install"
+      echo ""
+      echo "Install the UI helper LaunchAgent, replacing a loaded one. Run it from the"
+      echo "primary checkout: the agent keeps using this checkout's venv."
+      echo ""
+      echo "The agent runs through AppleNotesMCP.app, so run ./run mcp-app-install first."
+      echo "That app needs Full Disk Access and Device Control and Data Access (called"
+      echo "Accessibility on older macOS)."
+      ;;
+    demo-build|demo-ui|demo-mcp)
+      echo "Usage: ./run demo-build | demo-ui | demo-mcp"
+      echo ""
+      echo "Run against invented notes instead of your Apple Notes library."
+      echo ""
+      echo "  demo-build   write demo/home/.../NoteStore.sqlite in the real Notes"
+      echo "               database format (demo/build_demo_db.py, demo/demo_content.py)"
+      echo "  demo-ui      build the UI and open it with HOME set to demo/home"
+      echo "  demo-mcp     run apple-notes-mcp (stdio) with HOME set to demo/home"
+      echo ""
+      echo "The database reader finds NoteStore.sqlite relative to HOME, so the demo"
+      echo "runs the normal read path with no code switch, and its config, caches and"
+      echo "logs stay inside demo/home. The demo commands also set NOTES_GRAPH_DEMO=1,"
+      echo "which makes the demo read-only by enforcement: write tools, opening a note"
+      echo "in Notes, and anything else that would drive the Notes app refuse."
+      ;;
+    remote-writes)
+      echo "Usage: ./run remote-writes <list [--all] | apply <write_id>|--all | undo <write_id> | pause | resume | clear>"
+      echo ""
+      echo "Remote write queue (issue #169). Remote write tools queue their calls; the"
+      echo "server applies them through the normal write pipeline (overlay + countdown)"
+      echo "right away when the Mac is unlocked, else 1 min after the next unlock."
+      echo ""
+      echo "  list [--all]          recent writes: id, status, age, tool, note title (no contents)"
+      echo "  apply <id> | --all    apply now, oldest first (needs an unlocked screen)"
+      echo "  undo <id>             put back what an applied write replaced (refuses if the"
+      echo "                        note changed since; add_note is undone by deleting)"
+      echo "  pause | resume        stop / restart the server applying writes (it still accepts)"
+      echo "  clear                 reject every queued write"
+      ;;
+    *)
+      # Simple commands without options
+      echo "Usage: ./run $1"
+      echo ""
+      help-for "$1"
+      ;;
+  esac
+}
+
+# Setup (worktree lifecycle itself is handled by worktrunk - see .config/wt.toml)
+run-initialize() {
+  ./scripts/initialize.sh
+}
+
+# Notes Graph UI (Electron)
+run-ui-start() {
+  npm start
+}
+
+# Renderer bundle only. A packaged app needs the checkout path baked into its
+# metadata, which only ui-app-install supplies; a bare electron-builder run
+# produces an app that quits at startup.
+run-ui-build() {
+  npm run build:ui
+}
+
+run-ui-test() {
+  npm test
+}
+
+refuse-if-ui-app-running() {
+  # Anchored: pgrep -f matches anywhere in a command line, so without ^ any shell
+  # or editor whose arguments mention this path would count as the app.
+  if pgrep -f "^/Applications/Notes Graph.app/Contents/MacOS/Notes Graph" >/dev/null; then
+    echo "ERROR: Notes Graph is running. Quit it first, then re-run this command."
+    exit 1
+  fi
+}
+
+# Standalone Notes Graph.app (issue #238). The UI ships inside the bundle and
+# Python runs from the primary worktree, so feature worktrees can come and go.
+run-ui-app-install() {
+  local INSTALL_DIR="/Applications/Notes Graph.app"
+  local DIST_APP="$PROJECT_ROOT/dist/mac-arm64/Notes Graph.app"
+  local BUNDLE_ID="com.benralston.notes-graph"
+
+  refuse-if-ui-app-running
+  if [ -L "$INSTALL_DIR" ]; then
+    echo "ERROR: $INSTALL_DIR is a symlink — refusing to rsync --delete through it"
+    exit 1
+  fi
+  if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+    echo "ERROR: $INSTALL_DIR exists but is not a directory"
+    exit 1
+  fi
+  local FIRST_INSTALL=1
+  if [ -d "$INSTALL_DIR" ]; then
+    FIRST_INSTALL=0
+    local existing_id
+    existing_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+      "$INSTALL_DIR/Contents/Info.plist" 2>/dev/null || echo "")
+    # An empty id means an interrupted earlier install; re-running repairs it.
+    if [ -n "$existing_id" ] && [ "$existing_id" != "$BUNDLE_ID" ]; then
+      echo "ERROR: $INSTALL_DIR has unexpected CFBundleIdentifier '$existing_id'"
+      exit 1
+    fi
+  fi
+
+  # The first porcelain entry is the primary worktree. Paths can contain spaces,
+  # so take everything after "worktree " rather than awk's $2.
+  local REPO_ROOT
+  REPO_ROOT=$(git -C "$PROJECT_ROOT" worktree list --porcelain | awk 'NR==1 { print substr($0, 10) }')
+  local REPO_BRANCH
+  REPO_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "detached HEAD")
+  if [ "$REPO_BRANCH" != "main" ]; then
+    echo "WARNING: $REPO_ROOT is on $REPO_BRANCH, not main. The app will run its Python from there."
+  fi
+  if [ "$PROJECT_ROOT" != "$REPO_ROOT" ]; then
+    echo "WARNING: installing this worktree's UI against Python in $REPO_ROOT."
+    echo "         The app may show UI update ready until this branch's UI reaches that checkout."
+  fi
+
+  echo "Syncing Python environment in $REPO_ROOT..."
+  uv sync --directory "$REPO_ROOT" >/dev/null
+  if [ ! -x "$REPO_ROOT/.venv/bin/python3" ]; then
+    echo "ERROR: $REPO_ROOT/.venv/bin/python3 not executable after uv sync"
+    exit 1
+  fi
+
+  echo "Syncing npm dependencies..."
+  (cd "$PROJECT_ROOT" && npm install --no-audit --no-fund >/dev/null)
+
+  echo "Building UI..."
+  (cd "$PROJECT_ROOT" && npm run build:ui)
+
+  local FINGERPRINT
+  FINGERPRINT=$(node "$PROJECT_ROOT/src/ui-fingerprint.js" "$PROJECT_ROOT")
+  if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain -- src package.json package-lock.json vite.config.js assets)" ]; then
+    echo "WARNING: uncommitted changes in src/, package.json, package-lock.json, vite.config.js or assets/."
+    echo "         They'll be installed, but the update chip only compares committed code."
+  fi
+
+  # Signing happens below: electron-builder's identity lookup only accepts
+  # trusted certificates, and the stable local identity is self-signed.
+  echo "Packaging app..."
+  (cd "$PROJECT_ROOT" && npx electron-builder --mac dir --arm64 \
+    -c.mac.identity=null \
+    "-c.extraMetadata.notesGraphRepoRoot=$REPO_ROOT" \
+    "-c.extraMetadata.notesGraphUiFingerprint=$FINGERPRINT")
+
+  local SIGN_IDENTITY=${NOTES_GRAPH_SIGN_IDENTITY:-}
+  if [ -z "$SIGN_IDENTITY" ]; then
+    echo "WARNING: NOTES_GRAPH_SIGN_IDENTITY not set — using ad-hoc signing."
+    echo "         Permission grants will not survive rebuilds. Run apple_notes_mcp_app/sign-setup.sh"
+    echo "         to create a stable local signing identity."
+    SIGN_IDENTITY="-"
+  fi
+  echo "Codesigning with identity: $SIGN_IDENTITY"
+  codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$DIST_APP"
+  codesign --verify --deep --strict "$DIST_APP"
+
+  # Checked again because the app could have been opened during the build, and
+  # replacing a running bundle's files can crash it.
+  refuse-if-ui-app-running
+  echo "Installing to $INSTALL_DIR..."
+  rsync -a --delete "$DIST_APP/" "$INSTALL_DIR/"
+  codesign --verify --deep --strict "$INSTALL_DIR"
+
+  # Spotlight indexes any .app it finds, so a leftover build would show up as a
+  # second Notes Graph and could outlive its worktree.
+  rm -rf "$DIST_APP"
+
+  echo ""
+  echo "Installed: $INSTALL_DIR"
+  echo "Python runs from: $REPO_ROOT"
+  if [ "$FIRST_INSTALL" = "1" ]; then
+    echo ""
+    echo "Next: open it from Spotlight, then allow it once in System Settings -> Privacy & Security:"
+    echo "  1. Full Disk Access: needed to read your notes. The app offers to open this page."
+    echo "  2. Device Control and Data Access (Accessibility on older macOS): needed to add links."
+    echo "  3. Automation: macOS asks the first time you open, link or delete a note."
+  fi
+}
+
+# MCP Server (Python)
+run-mcp-test() {
+  uv run pytest tests/ "$@"
+}
+
+# All tests — referenced by the worktrunk pre-merge hook (.config/wt.toml)
+run-test() {
+  run-ui-test
+  run-mcp-test "$@"
+}
+
+# UI Helper Daemon
+run-ui-helper-start() {
+  uv run notes-graph-ui-helper
+}
+
+run-ui-helper-install() {
+  local PLIST_TEMPLATE="$PROJECT_ROOT/launchd/com.notes-graph.ui-helper.plist.template"
+  local PLIST_DEST="$HOME/Library/LaunchAgents/com.notes-graph.ui-helper.plist"
+
+  if [ ! -f "$PLIST_TEMPLATE" ]; then
+    echo "ERROR: Template not found: $PLIST_TEMPLATE"
+    exit 1
+  fi
+
+  # The daemon needs the wrapper's Full Disk Access and Accessibility grants.
+  if [ ! -x "$HOME/Applications/AppleNotesMCP.app/Contents/MacOS/AppleNotesMCPRunner" ]; then
+    echo "ERROR: AppleNotesMCP.app is not installed. Run ./run mcp-app-install first."
+    exit 1
+  fi
+
+  # Ensure venv and entry point are up to date (no longer using uv run)
+  uv sync --directory "$PROJECT_ROOT"
+
+  if [ ! -x "$PROJECT_ROOT/.venv/bin/notes-graph-ui-helper" ]; then
+    echo "ERROR: Daemon entry not found: $PROJECT_ROOT/.venv/bin/notes-graph-ui-helper"
+    exit 1
+  fi
+
+  # Render and check before touching the running daemon.
+  mkdir -p "$(dirname "$PLIST_DEST")"
+  local RENDERED
+  RENDERED=$(mktemp "$PLIST_DEST.XXXXXX")
+  sed \
+    -e "s|__NOTES_GRAPH_DIR__|${PROJECT_ROOT}|g" \
+    -e "s|__HOME__|${HOME}|g" \
+    "$PLIST_TEMPLATE" > "$RENDERED"
+  if ! plutil -lint -s "$RENDERED"; then
+    rm -f "$RENDERED"
+    echo "ERROR: Rendered plist is invalid; the running daemon was not touched."
+    exit 1
+  fi
+  chmod 644 "$RENDERED"
+
+  # bootout/bootstrap, not unload/load: those exit 0 on failure, and over SSH they
+  # act on the SSH session's domain instead of the GUI session the daemon runs in.
+  local DOMAIN SERVICE LOG
+  DOMAIN="gui/$(id -u)"
+  SERVICE="$DOMAIN/com.notes-graph.ui-helper"
+  LOG="$HOME/Library/Logs/notes-graph-ui-helper.log"
+
+  launchctl bootout "$SERVICE" 2>/dev/null || true
+  # bootout can return before the job exits; a write in flight gets ExitTimeOut (30s).
+  local attempt
+  for attempt in {1..35}; do
+    launchctl print "$SERVICE" >/dev/null 2>&1 || break
+    if [ "$attempt" = 35 ]; then
+      rm -f "$RENDERED"
+      echo "ERROR: The old daemon did not exit; the plist was not changed. See $LOG"
+      exit 1
+    fi
+    sleep 1
+  done
+
+  mv "$RENDERED" "$PLIST_DEST"
+  if ! launchctl bootstrap "$DOMAIN" "$PLIST_DEST"; then
+    echo "ERROR: launchctl bootstrap failed; the daemon is NOT running. See $LOG"
+    exit 1
+  fi
+
+  # Several checks in a row: a daemon that crashes on startup is briefly "running".
+  local PRINTED RUNNING=0
+  for attempt in {1..15}; do
+    PRINTED=$(launchctl print "$SERVICE" 2>/dev/null) || true
+    if [[ "$PRINTED" == *"state = running"* ]]; then
+      RUNNING=$((RUNNING + 1))
+    else
+      RUNNING=0
+    fi
+    if [ "$RUNNING" = 5 ]; then
+      echo "Installed and running: $PLIST_DEST"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: The daemon was loaded but is not running. See $LOG"
+  exit 1
+}
+
+run-ui-helper-uninstall() {
+  local PLIST_DEST="$HOME/Library/LaunchAgents/com.notes-graph.ui-helper.plist"
+
+  if [ -f "$PLIST_DEST" ]; then
+    launchctl unload "$PLIST_DEST" 2>/dev/null || true
+    rm "$PLIST_DEST"
+    echo "Unloaded and removed: $PLIST_DEST"
+  else
+    echo "Not installed: $PLIST_DEST"
+  fi
+}
+
+run-ui-helper-status() {
+  local SOCKET_PATH="$HOME/Library/Application Support/notes-graph/ui-helper.sock"
+  local PID_FILE="$HOME/Library/Application Support/notes-graph/ui-helper.pid"
+
+  if [ ! -S "$SOCKET_PATH" ]; then
+    echo "Status: NOT RUNNING (no socket)"
+    return 1
+  fi
+
+  if [ -f "$PID_FILE" ]; then
+    local PID
+    PID=$(cat "$PID_FILE")
+    if kill -0 "$PID" 2>/dev/null; then
+      echo "Status: RUNNING (pid=$PID)"
+    else
+      echo "Status: STALE (pid=$PID not found, socket exists)"
+      return 1
+    fi
+  else
+    echo "Status: UNKNOWN (socket exists but no PID file)"
+    return 1
+  fi
+
+  # Try a ping via the socket
+  if echo '{"id":"health","command":"ping","params":{}}' | uv run python -c "
+import socket, sys, json
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+try:
+    s.connect('$SOCKET_PATH')
+    s.sendall(sys.stdin.buffer.read() + b'\n')
+    resp = json.loads(s.recv(4096).decode())
+    print('Ping:', 'OK' if resp.get('success') else 'FAILED')
+except Exception as e:
+    print(f'Ping: FAILED ({e})')
+finally:
+    s.close()
+"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Apple Notes MCP .app wrapper (issue #84)
+run-mcp-app-build() {
+  "$PROJECT_ROOT/apple_notes_mcp_app/build.sh" "$@"
+}
+
+run-mcp-app-spike() {
+  local INSTALLED_APP="$HOME/Applications/AppleNotesMCP.app"
+  local DIST_APP="$PROJECT_ROOT/dist/AppleNotesMCP.app"
+  local APP_PATH
+
+  if [ -d "$INSTALLED_APP" ]; then
+    APP_PATH="$INSTALLED_APP"
+  elif [ -d "$DIST_APP" ]; then
+    APP_PATH="$DIST_APP"
+    echo "NOTE: using build output at $DIST_APP — install to ~/Applications and grant FDA for a real test"
+  else
+    echo "ERROR: AppleNotesMCP.app not found. Run ./run mcp-app-build first."
+    exit 1
+  fi
+
+  local RUNNER="$APP_PATH/Contents/MacOS/AppleNotesMCPRunner"
+
+  # Make the venv python discoverable by the runner (probe-uv-venv).
+  uv sync --directory "$PROJECT_ROOT" >/dev/null
+  local VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+  if [ ! -x "$VENV_PYTHON" ]; then
+    echo "ERROR: venv python not found at $VENV_PYTHON"
+    exit 1
+  fi
+  export NOTES_GRAPH_PYTHON_ENTRY="$VENV_PYTHON"
+
+  echo "App:    $APP_PATH"
+  echo "Python: $VENV_PYTHON"
+  echo ""
+
+  echo "--- Baseline: /usr/bin/python3 outside the wrapper ---"
+  /usr/bin/python3 -c "
+import sys
+try:
+    f = open('$HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite', 'rb')
+    d = f.read(16); f.close()
+    print('baseline[python3-direct]:', 'OK' if len(d) == 16 else 'PARTIAL')
+except Exception as e:
+    print('baseline[python3-direct]: FAIL', e)
+" || true
+  echo ""
+
+  echo "--- Probe: --probe-self (Swift opens NoteStore.sqlite directly) ---"
+  "$RUNNER" --probe-self || true
+  echo ""
+
+  echo "--- Probe: --probe-python3 (Swift -> /usr/bin/python3) ---"
+  "$RUNNER" --probe-python3 || true
+  echo ""
+
+  echo "--- Probe: --probe-uv-venv (Swift -> .venv/bin/python) ---"
+  "$RUNNER" --probe-uv-venv || true
+  echo ""
+
+  echo "Done. Record which probes returned exit 0."
+  echo "If --probe-uv-venv passed, also test the direct command path:"
+  echo "  Set claude_desktop_config.json -> command = $RUNNER, args = [\"--bridge-stdio\"]"
+  echo "  Restart Claude Desktop, ask for list_notes."
+}
+
+run-mcp-app-install() {
+  local INSTALL_DIR="$HOME/Applications/AppleNotesMCP.app"
+  local EXPECTED_INSTALL_DIR="$HOME/Applications/AppleNotesMCP.app"
+  local DIST_APP="$PROJECT_ROOT/dist/AppleNotesMCP.app"
+
+  echo "Syncing venv..."
+  uv sync --directory "$PROJECT_ROOT" >/dev/null
+
+  local PYTHON_ENTRY="$PROJECT_ROOT/.venv/bin/apple-notes-mcp"
+  if [ ! -x "$PYTHON_ENTRY" ]; then
+    echo "ERROR: $PYTHON_ENTRY not executable after uv sync"
+    exit 1
+  fi
+
+  # Always rebuild — fast, and avoids shipping stale bundles when non-Swift
+  # inputs (Info.plist.template, build.sh, signing env) change.
+  echo "Building .app..."
+  "$PROJECT_ROOT/apple_notes_mcp_app/build.sh"
+
+  # Guard rsync --delete: refuse to touch anything that isn't the exact
+  # expected path and either absent or an existing non-symlink .app bundle.
+  if [ "$INSTALL_DIR" != "$EXPECTED_INSTALL_DIR" ]; then
+    echo "ERROR: refusing to install to unexpected path: $INSTALL_DIR"
+    exit 1
+  fi
+  if [ -L "$INSTALL_DIR" ]; then
+    echo "ERROR: $INSTALL_DIR is a symlink — refusing to rsync --delete through it"
+    exit 1
+  fi
+  if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+    echo "ERROR: $INSTALL_DIR exists but is not a directory"
+    exit 1
+  fi
+  if [ -d "$INSTALL_DIR" ]; then
+    local existing_id
+    existing_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+      "$INSTALL_DIR/Contents/Info.plist" 2>/dev/null || echo "")
+    if [ -n "$existing_id" ] && [ "$existing_id" != "com.notes-graph.apple-notes-mcp" ]; then
+      echo "ERROR: $INSTALL_DIR has unexpected CFBundleIdentifier '$existing_id'"
+      exit 1
+    fi
+  fi
+
+  echo "Installing to $INSTALL_DIR..."
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  rsync -a --delete "$DIST_APP/" "$INSTALL_DIR/"
+
+  # Bake the venv entry path into the bundle so no env var is needed in Claude Desktop config.
+  echo "$PYTHON_ENTRY" > "$INSTALL_DIR/Contents/Resources/python-entry.txt"
+
+  # Re-sign after modifying Contents/Resources — otherwise codesign --verify fails.
+  local SIGN_IDENTITY=${NOTES_GRAPH_SIGN_IDENTITY:--}
+  codesign --sign "$SIGN_IDENTITY" --force --timestamp=none --options runtime --entitlements "$PROJECT_ROOT/apple_notes_mcp_app/AppleNotesMCP.entitlements" "$INSTALL_DIR"
+  codesign --verify --strict "$INSTALL_DIR"
+
+  echo ""
+  echo "Installed: $INSTALL_DIR"
+  echo "Python entry: $PYTHON_ENTRY"
+  echo ""
+  if [ "$SIGN_IDENTITY" = "-" ]; then
+    echo "WARNING: ad-hoc signed. FDA grant will not survive rebuilds."
+    echo "         Run ./apple_notes_mcp_app/sign-setup.sh for a stable local identity."
+    echo ""
+  fi
+  echo "Next:"
+  echo "  1. Grant FDA: System Settings -> Privacy & Security -> Full Disk Access"
+  echo "               -> + -> Cmd+Shift+G -> ~/Applications -> AppleNotesMCP.app"
+  echo "  2. Paste this into ~/Library/Application Support/Claude/claude_desktop_config.json"
+  echo "     (replace any existing apple-notes entry):"
+  echo ""
+  cat <<EOF
+  "apple-notes": {
+    "command": "$INSTALL_DIR/Contents/MacOS/AppleNotesMCPRunner",
+    "args": ["--bridge-stdio"]
+  }
+EOF
+  echo ""
+  echo "  3. Restart Claude Desktop."
+}
+
+run-mcp-app-uninstall() {
+  local INSTALL_DIR="$HOME/Applications/AppleNotesMCP.app"
+  if [ ! -d "$INSTALL_DIR" ]; then
+    echo "Not installed: $INSTALL_DIR"
+    return 0
+  fi
+  read -r -p "Remove $INSTALL_DIR? [y/N] " REPLY
+  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    return 1
+  fi
+  rm -rf "$INSTALL_DIR"
+  echo "Removed: $INSTALL_DIR"
+  echo "Note: FDA grant remains in TCC. Remove via System Settings if desired."
+}
+
+run-mcp-app-status() {
+  local INSTALL_DIR="$HOME/Applications/AppleNotesMCP.app"
+  local ENTRY_FILE="$INSTALL_DIR/Contents/Resources/python-entry.txt"
+
+  if [ ! -d "$INSTALL_DIR" ]; then
+    echo "Status:    NOT INSTALLED"
+    echo "Run:       ./run mcp-app-install"
+    return 1
+  fi
+
+  echo "Bundle:    $INSTALL_DIR"
+
+  if codesign --verify --strict "$INSTALL_DIR" 2>/dev/null; then
+    echo "Signature: OK"
+  else
+    echo "Signature: FAIL"
+    codesign --verify --verbose=2 "$INSTALL_DIR" 2>&1 | sed 's/^/           /' || true
+    return 1
+  fi
+
+  local IDENTITY
+  IDENTITY=$(codesign -dvv "$INSTALL_DIR" 2>&1 | awk -F= '/^Authority=/{print $2; exit}')
+  echo "Identity:  ${IDENTITY:-(ad-hoc)}"
+
+  if [ -f "$ENTRY_FILE" ]; then
+    local PY
+    PY=$(cat "$ENTRY_FILE")
+    echo "Python:    $PY"
+    if [ ! -x "$PY" ]; then
+      echo "           WARNING: not executable — re-run ./run mcp-app-install"
+      return 1
+    fi
+  else
+    echo "Python:    (not set — run ./run mcp-app-install)"
+    return 1
+  fi
+
+  echo ""
+  echo "Note: FDA is granted per-bundle in System Settings. This status check does"
+  echo "not probe FDA — the authoritative test is a Claude Desktop Chat tab."
+}
+
+# Remote connector (issue #167) - see docs/remote-connector.md
+run-remote-start() {
+  uv run --directory "$PROJECT_ROOT" apple-notes-mcp-remote serve "$@"
+}
+
+run-remote-check() {
+  uv run --directory "$PROJECT_ROOT" apple-notes-mcp-remote check-config "$@"
+}
+
+run-remote-revoke-tokens() {
+  uv run --directory "$PROJECT_ROOT" apple-notes-mcp-remote revoke-all "$@"
+}
+
+run-remote-allow-client() {
+  if [ -z "${1:-}" ]; then
+    echo "Usage: ./run remote-allow-client <client_id>  (the id is shown on the refusal page)"
+    exit 1
+  fi
+  uv run --directory "$PROJECT_ROOT" apple-notes-mcp-remote allow-client "$@"
+}
+
+run-remote-writes() {
+  if [[ $# -eq 0 ]]; then
+    help-detail remote-writes
+    exit 1
+  fi
+  uv run --directory "$PROJECT_ROOT" apple-notes-mcp-remote writes "$@"
+}
+
+run-remote-kill() {
+  "$PROJECT_ROOT/scripts/remote-kill-switch.sh"
+}
+
+run-remote-plist() {
+  local TEMPLATE="$PROJECT_ROOT/launchd/com.notes-graph.mcp-remote.plist.template"
+  local OUT="$PROJECT_ROOT/dist/com.notes-graph.mcp-remote.plist"
+  mkdir -p "$PROJECT_ROOT/dist"
+  sed -e "s|__NOTES_GRAPH_DIR__|$PROJECT_ROOT|g" -e "s|__HOME__|$HOME|g" "$TEMPLATE" > "$OUT"
+  plutil -lint "$OUT"
+  echo "Rendered (not installed): $OUT"
+  echo "Install steps: docs/remote-connector.md (section 5)"
+}
+
+# Demo library (synthetic notes; see demo/README.md)
+demo-home() {
+  local DEMO_HOME="$PROJECT_ROOT/demo/home"
+  if [ ! -f "$DEMO_HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite" ]; then
+    run-demo-build >&2
+  fi
+  echo "$DEMO_HOME"
+}
+
+run-demo-build() {
+  (cd "$PROJECT_ROOT" && uv run python demo/build_demo_db.py "$@")
+}
+
+run-demo-ui() {
+  local DEMO_HOME
+  DEMO_HOME=$(demo-home)
+  (cd "$PROJECT_ROOT" && npm run build:ui)
+  # CFFIXED_USER_HOME moves Electron's own profile into the demo home too.
+  # NOTES_GRAPH_DEMO=1 makes the app refuse anything that would drive Notes.
+  HOME="$DEMO_HOME" CFFIXED_USER_HOME="$DEMO_HOME" NOTES_GRAPH_DEMO=1 \
+    "$PROJECT_ROOT/node_modules/.bin/electron" "$PROJECT_ROOT"
+}
+
+run-demo-mcp() {
+  local DEMO_HOME
+  DEMO_HOME=$(demo-home)
+  # NOTES_GRAPH_DEMO=1 makes every write tool refuse before doing anything.
+  HOME="$DEMO_HOME" NOTES_GRAPH_DEMO=1 exec "$PROJECT_ROOT/.venv/bin/apple-notes-mcp" "$@"
+}
+
+PROJECT_ROOT=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+source "$PROJECT_ROOT/scripts/_cli.sh"

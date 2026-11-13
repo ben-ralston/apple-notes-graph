@@ -1,0 +1,2 @@
+# Apple Notes library dependencies
+bbpb>=1.4.0

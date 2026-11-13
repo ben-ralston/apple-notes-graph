@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Remote Apple Notes MCP server (issue #167) - PREPARED, NOT INSTALLED.
+  Render with `./run remote-plist` (writes dist/com.notes-graph.mcp-remote.plist),
+  then install by hand: see docs/remote-connector.md.
+
+  Runs through the signed AppleNotesMCP.app wrapper so the Full Disk Access
+  grant on that bundle covers the Python process reading NoteStore.sqlite
+  (launchd -> AppleNotesMCPRunner -> python; same TCC chain as Claude Desktop).
+  `- -bridge-stdio` execs NOTES_GRAPH_PYTHON_ENTRY, which here points at the
+  remote entry point instead of the stdio one. Do NOT wrap this in caffeinate:
+  caffeinate would become the responsible process and the FDA grant would not
+  apply. Keep the Mac awake with the Energy setting instead.
+
+  The server binds 127.0.0.1:9893 only; the tunnel (Cloudflare or Tailscale
+  Funnel) is what makes it public.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.notes-graph.mcp-remote</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/AppleNotesMCP.app/Contents/MacOS/AppleNotesMCPRunner</string>
+        <string>--bridge-stdio</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <key>WorkingDirectory</key>
+    <string>__NOTES_GRAPH_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>NOTES_GRAPH_PYTHON_ENTRY</key>
+        <string>__NOTES_GRAPH_DIR__/.venv/bin/apple-notes-mcp-remote</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/apple-notes-mcp/server.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/apple-notes-mcp/server.log</string>
+</dict>
+</plist>

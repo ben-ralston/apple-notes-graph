@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "apple-notes-dev": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        ".",
+        "apple-notes-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

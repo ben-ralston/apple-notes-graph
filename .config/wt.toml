@@ -1,0 +1,8 @@
+[pre-start]
+install = "{{ worktree_path }}/run initialize"
+
+[pre-merge]
+test = "{{ worktree_path }}/run test"
+
+[pre-remove]
+tmux-cleanup = "tmux kill-session -t {{ worktree_name }} 2>/dev/null || true"

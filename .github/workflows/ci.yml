@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# macOS runner minutes are billed 10x — cancel superseded runs on the same PR.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      # The JS tests never load Electron, so skip downloading its binary.
+      - name: Install JS dependencies
+        run: npm ci --no-audit --no-fund
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      # Before the slower Python suite: a JS failure ends the billed run early.
+      - name: Run JS tests
+        run: npm test
+
+      # setup-uv publishes no moving major tag past v7 — pin the exact version.
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # macos_gui marks tests needing a live GUI session + Apple Notes/TCC,
+      # which GitHub-hosted runners can't provide (issue #95). embedding_model
+      # marks tests that download the real fastembed ONNX model (issue #117).
+      - name: Run headless test suite
+        run: uv run pytest tests/ -m "not macos_gui and not embedding_model"

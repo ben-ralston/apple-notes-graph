@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs through the signed AppleNotesMCP.app wrapper, like the remote server, so the
+  Full Disk Access and Accessibility grants on that bundle cover the Python process.
+  Section edits read NoteStore.sqlite and fail without Full Disk Access.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.notes-graph.ui-helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/AppleNotesMCP.app/Contents/MacOS/AppleNotesMCPRunner</string>
+        <string>--bridge-stdio</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <key>WorkingDirectory</key>
+    <string>__NOTES_GRAPH_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>NOTES_GRAPH_PYTHON_ENTRY</key>
+        <string>__NOTES_GRAPH_DIR__/.venv/bin/notes-graph-ui-helper</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/notes-graph-ui-helper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/notes-graph-ui-helper.log</string>
+</dict>
+</plist>

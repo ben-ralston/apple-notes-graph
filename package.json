@@ -1,0 +1,56 @@
+{
+  "name": "notes-graph",
+  "productName": "Notes Graph",
+  "version": "0.1.0",
+  "description": "Visualize Apple Notes as an interactive graph",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "npm run build:ui && electron .",
+    "dev": "concurrently -k \"vite\" \"VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "build:ui": "vite build",
+    "test": "vitest run",
+    "postinstall": "bash scripts/brand-electron-dev.sh || true"
+  },
+  "build": {
+    "appId": "com.benralston.notes-graph",
+    "productName": "Notes Graph",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Notes Graph controls Apple Notes to open notes, add links and delete notes."
+      }
+    },
+    "files": [
+      "package.json",
+      "src/*.js",
+      "!src/*.test.js",
+      "dist-ui/**",
+      "assets/icon.png",
+      "!node_modules/**"
+    ]
+  },
+  "author": "Ben Ralston",
+  "license": "MIT",
+  "devDependencies": {
+    "@lucide/svelte": "^1.67.0",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "concurrently": "^10.0.6",
+    "electron": "^42.11.16",
+    "electron-builder": "^26.15.3",
+    "playwright-core": "^1.61.1",
+    "svelte": "^5.56.4",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "d3": "^7.8.5"
+  },
+  "allowScripts": {
+    "electron@42.11.16": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

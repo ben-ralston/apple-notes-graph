@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./run mcp-test)",
+      "mcp__apple-notes-dev__list_notes",
+      "mcp__apple-notes-dev__read_note_content",
+      "mcp__apple-notes-dev__search_notes",
+      "mcp__apple-notes-dev__get_note_graph"
+    ]
+  }
+}

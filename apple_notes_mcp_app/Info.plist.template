@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>AppleNotesMCPRunner</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.notes-graph.apple-notes-mcp</string>
+	<key>CFBundleName</key>
+	<string>AppleNotesMCP</string>
+	<key>CFBundleDisplayName</key>
+	<string>Apple Notes MCP</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSRemindersUsageDescription</key>
+	<string>Lets the Apple Notes MCP connector read your reminders and, once you turn it on, complete or add them.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Lets the Apple Notes MCP connector read your reminders and, once you turn it on, complete or add them.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+</dict>
+</plist>

@@ -1,0 +1,49 @@
+# From <https://github.com/github/gitignore/blob/main/Global/macOS.gitignore>
+
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon[]
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+node_modules/
+//node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Build output (issue #84 — AppleNotesMCP.app wrapper)
+dist/
+.superpowers/
+
+# Vite build output (issue #113 — Svelte renderer)
+dist-ui/
+
+# Generated demo library (uv run python demo/build_demo_db.py)
+demo/home/
+
+# Test and tool caches
+.pytest_cache/
+.ruff_cache/
+*.pyo
